@@ -77,49 +77,69 @@ def run_leader_analysis(stock_df, analysis_days, target_alpha, avg_trade_val_thr
         progress_bar.progress(10, text="Step 1. 분석 대상 확정")
 
         # ==========================================
-        # 2. 데이터 다운로드 (야후 파이낸스 Rate Limit 방지 스텔스 모드)
+        # 2. 데이터 다운로드 (일일 CSV 스마트 캐싱 적용)
         # ==========================================
-        status_text.text(f"Step 2: {len(all_yahoo_tickers)}개 종목 데이터 다운로드 중... (서버 과부하 방지 분할 다운로드)")
         today = datetime.date.today()
-        start_period = today - datetime.timedelta(days=380) # 250일 최고가 계산을 위해 기간 확장
+        today_str = today.strftime('%Y%m%d') # 🌟 오늘 날짜 문자열 고정
+        start_period = today - datetime.timedelta(days=380)
         
-        chunk_size = 100 # 한 번에 100개씩만 요청 (안전 제일)
-        data_frames = []
-        total_tickers = len(all_yahoo_tickers)
+        base_dir = os.path.dirname(os.path.abspath(__file__))
         
-        for i in range(0, total_tickers, chunk_size):
-            chunk = all_yahoo_tickers[i : i + chunk_size]
-            
-            try:
-                # 100개씩 다운로드
-                chunk_data = yf.download(chunk, start=start_period, end=today + datetime.timedelta(days=1), progress=False, ignore_tz=True)
-                
-                # 성공적으로 가져온 경우 보관함(리스트)에 추가
-                if not chunk_data.empty:
-                    data_frames.append(chunk_data)
-                
-                # 야후 서버가 눈치채지 못하게 0.5초 숨 고르기
-                time.sleep(0.5)
-                
-            except Exception as e:
-                # 특정 조각에서 에러가 나도 앱이 죽지 않고 다음 조각으로 넘어가도록 방어
-                print(f"다운로드 일부 실패 (무시하고 진행): {e}")
-                continue
-                
-            # 진행률 바 부드럽게 업데이트 (10% ~ 50% 구간)
-            current_progress = 10 + int(40 * (min(i + chunk_size, total_tickers) / total_tickers))
-            progress_bar.progress(current_progress, text=f"Step 2. 데이터 다운로드 중... ({min(i + chunk_size, total_tickers)}/{total_tickers})")
+        cache_filename = os.path.join(base_dir, f"yf_data_{len(all_yahoo_tickers)}_{today_str}.csv")
+        
+        # 🧹 하우스키핑 수정: 이름이 완벽히 같지 않다고 지우는 게 아니라, 
+        # 파일명에 '오늘 날짜'가 없는 진짜 과거 파일들만 골라서 삭제합니다!
+        for f in os.listdir(base_dir):
+            if f.startswith('yf_data_') and f.endswith('.csv') and (today_str not in f):
+                try:
+                    os.remove(os.path.join(base_dir, f))
+                except:
+                    pass
 
-        # 쪼개서 받은 데이터 조각들을 퍼즐 맞추듯 하나로 합치기 (옆으로 이어 붙임)
-        if data_frames:
-            data = pd.concat(data_frames, axis=1)
-            # 합치는 과정에서 혹시 중복된 컬럼이 생겼다면 제거
-            data = data.loc[:, ~data.columns.duplicated()]
-        else:
-            st.error("야후 서버에서 데이터를 전혀 가져오지 못했습니다. IP 차단이 풀릴 때까지 잠시(약 10~30분) 기다려주세요.")
-            return None
+        # (이하 로직은 기존과 동일하게 진행됩니다)
+        if os.path.exists(cache_filename):
+            status_text.text(f"Step 2: 오늘({today.strftime('%Y-%m-%d')}) 저장된 데이터를 불러옵니다... ⚡초고속 로딩⚡")
             
-        progress_bar.progress(50, text="Step 2. 데이터 다운로드 완료")
+            # yfinance의 복잡한 MultiIndex(이중 컬럼)를 완벽하게 복원하기 위해 header=[0, 1] 사용
+            data = pd.read_csv(cache_filename, header=[0, 1], index_col=0, parse_dates=True)
+            progress_bar.progress(50, text="Step 2. 데이터 다운로드 완료 (로컬 CSV 캐시 사용)")
+            
+        else:
+            status_text.text(f"Step 2: {len(all_yahoo_tickers)}개 종목 데이터 다운로드 중... (이 작업은 오늘 하루 한 번만 수행됩니다!)")
+            chunk_size = 100 # 한 번에 100개씩만 요청
+            data_frames = []
+            total_tickers = len(all_yahoo_tickers)
+            
+            for i in range(0, total_tickers, chunk_size):
+                chunk = all_yahoo_tickers[i : i + chunk_size]
+                
+                try:
+                    chunk_data = yf.download(chunk, start=start_period, end=today + datetime.timedelta(days=1), progress=False, ignore_tz=True)
+                    
+                    if not chunk_data.empty:
+                        data_frames.append(chunk_data)
+                    
+                    time.sleep(0.5) # 야후 서버 과부하 방지
+                    
+                except Exception as e:
+                    print(f"다운로드 일부 실패 (무시하고 진행): {e}")
+                    continue
+                    
+                current_progress = 10 + int(40 * (min(i + chunk_size, total_tickers) / total_tickers))
+                progress_bar.progress(current_progress, text=f"Step 2. 데이터 다운로드 중... ({min(i + chunk_size, total_tickers)}/{total_tickers})")
+
+            if data_frames:
+                data = pd.concat(data_frames, axis=1)
+                data = data.loc[:, ~data.columns.duplicated()]
+                
+                # 💾 다운로드 완료 후 오늘 날짜로 CSV 저장 (내일이 되기 전까지 계속 재사용)
+                status_text.text("Step 2: 다운로드 완료! 다음 실행을 위해 데이터를 CSV 파일로 안전하게 저장합니다...")
+                data.to_csv(cache_filename)
+            else:
+                st.error("야후 서버에서 데이터를 전혀 가져오지 못했습니다. 잠시 후 다시 시도해주세요.")
+                return None
+                
+            progress_bar.progress(50, text="Step 2. 데이터 다운로드 완료")
 
 # 3. 데이터 전처리 및 계산
         status_text.text("Step 3: 주도주 점수 및 기관 매집 흔적 계산 중...")
@@ -131,7 +151,10 @@ def run_leader_analysis(stock_df, analysis_days, target_alpha, avg_trade_val_thr
         if kospi_code in volume_df.columns: volume_df.pop(kospi_code)
 
         if kospi_close.empty:
-            st.error("KOSPI 벤치마크 데이터를 가져올 수 없습니다. 분석을 중단합니다.")
+            st.error("⚠️ KOSPI 벤치마크 데이터를 가져올 수 없습니다. (야후 서버 지연) 잠시 후 다시 시도해 주세요.")
+            # 진행 바와 상태 메시지 깔끔하게 지워주기
+            status_text.empty() 
+            progress_bar.empty()
             return None
 
         # [지표 1] 신고가 근접도 계산 (전체 기간)
@@ -172,10 +195,27 @@ def run_leader_analysis(stock_df, analysis_days, target_alpha, avg_trade_val_thr
         stock_daily_returns = analysis_period_df.pct_change()
         kospi_daily_returns = analysis_kospi_close.pct_change()
         daily_alpha_for_persistence = stock_daily_returns.subtract(kospi_daily_returns, axis=0)
-        raw_alpha_persistence = (daily_alpha_for_persistence > 0).sum(axis=0) / len(daily_alpha_for_persistence.dropna()) * 100
+        
+        # 🌟 버그 해결: dropna()로 전체를 지우지 말고, 종목별 실제 유효 거래일 수(.count())를 각각 구합니다!
+        valid_days = daily_alpha_for_persistence.count(axis=0)
+        valid_days = valid_days.replace(0, 1) # 0으로 나누는 에러(Division by Zero) 방지
+        
+        # 순수 승률(%) 계산
+        raw_alpha_persistence = (daily_alpha_for_persistence > 0).sum(axis=0) / valid_days * 100
 
-        min_ap, max_ap = raw_alpha_persistence.min(), raw_alpha_persistence.max()
-        alpha_persistence_normalized = ((raw_alpha_persistence - min_ap) / (max_ap - min_ap)) * 100 if max_ap > min_ap else pd.Series(0.0, index=raw_alpha_persistence.index)
+        # 안전하게 빈칸(NaN)을 제거한 후 1등(최고 승률)과 꼴찌(최저 승률)를 찾습니다.
+        raw_ap_clean = raw_alpha_persistence.dropna()
+        min_ap = raw_ap_clean.min() if not raw_ap_clean.empty else 0
+        max_ap = raw_ap_clean.max() if not raw_ap_clean.empty else 0
+
+        # 상대평가 0~100점 정규화 진행
+        if max_ap > min_ap:
+            alpha_persistence_normalized = ((raw_alpha_persistence - min_ap) / (max_ap - min_ap)) * 100
+        else:
+            alpha_persistence_normalized = pd.Series(0.0, index=raw_alpha_persistence.index)
+            
+        # 혹시라도 계산 안 된 녀석들은 0점으로 안전하게 처리
+        alpha_persistence_normalized = alpha_persistence_normalized.fillna(0)
 
         # 🌟 [새로운 지표 점수화] Volume Spike 점수 (0~100점)
         # 분석 기간 중 거래량이 폭발한 날의 횟수를 구함
@@ -443,141 +483,204 @@ with st.expander("⭐ 나의 관심 종목", expanded=False):
 
     st.divider()
     if st.session_state['watchlist']:
-        col_watch_table, col_watch_chart = st.columns([2, 3])
+        watchlist_df = pd.DataFrame(st.session_state['watchlist'])
+        merged_df = watchlist_df.copy()
+        merged_df['수익률(%)'] = np.nan # 기본값으로 빈칸 설정
 
-        with col_watch_table:
-            watchlist_df = pd.DataFrame(st.session_state['watchlist'])
-            display_df = watchlist_df.copy() # 기본 표시용 데이터프레임
+        # =====================================================================
+        # [교체된 로직] 관심종목 수익률 계산 (분석 전 초경량 로딩 + 분석 후 재활용)
+        # =====================================================================
+        if 'leader_analysis_result' in st.session_state:
+            # 1. 주도주 분석을 돌린 후: 이미 있는 데이터를 재활용합니다.
+            res = st.session_state['leader_analysis_result']
+            analysis_days = res.get('analysis_days', 30)
+            
+            if 'full_data' in res and 'Close' in res['full_data']:
+                full_close = res['full_data']['Close']
+                rois = []
+                for _, row in merged_df.iterrows():
+                    y_ticker = to_yahoo_ticker(row['Code'], row['Market'])
+                    if y_ticker in full_close.columns:
+                        stock_series = full_close[y_ticker].dropna().tail(analysis_days + 1)
+                        if len(stock_series) >= 2:
+                            start_price = stock_series.iloc[0]
+                            end_price = stock_series.iloc[-1]
+                            rois.append((end_price - start_price) / start_price * 100 if start_price > 0 else np.nan)
+                        else:
+                            rois.append(np.nan)
+                    else:
+                        rois.append(np.nan)
+                merged_df['수익률(%)'] = rois
+        else:
+            # 2. 앱을 막 켰을 때: 관심 종목만 0.5초 만에 빠르게 다운로드!
+            yahoo_tickers = [to_yahoo_ticker(row['Code'], row['Market']) for _, row in merged_df.iterrows()]
+            if yahoo_tickers:
+                with st.spinner("관심 종목 수익률 업데이트 중..."):
+                    today = datetime.date.today()
+                    start_date = today - datetime.timedelta(days=60) # 30거래일치 확보를 위해 여유있게
+                    try:
+                        # 코스피 지수를 같이 받아 데이터 구조 안정화
+                        fetch_tickers = yahoo_tickers + ["^KS11"]
+                        temp_data = yf.download(fetch_tickers, start=start_date, end=today + datetime.timedelta(days=1), progress=False, ignore_tz=True)
+                        
+                        if not temp_data.empty and 'Close' in temp_data:
+                            rois = []
+                            for _, row in merged_df.iterrows():
+                                y_ticker = to_yahoo_ticker(row['Code'], row['Market'])
+                                if y_ticker in temp_data['Close'].columns:
+                                    # 기본 30거래일 기준으로 수익률 임시 계산
+                                    stock_series = temp_data['Close'][y_ticker].dropna().tail(31) 
+                                    if len(stock_series) >= 2:
+                                        start_price = stock_series.iloc[0]
+                                        end_price = stock_series.iloc[-1]
+                                        rois.append((end_price - start_price) / start_price * 100 if start_price > 0 else np.nan)
+                                    else:
+                                        rois.append(np.nan)
+                                else:
+                                    rois.append(np.nan)
+                            merged_df['수익률(%)'] = rois
+                    except Exception:
+                        pass
+        # =====================================================================
 
-            # 주도주 분석 결과가 있으면, 테이블 정보를 풍부하게 만듭니다.
-            if 'leader_analysis_result' in st.session_state and st.session_state['leader_analysis_result']['leader_stocks']:
-                res = st.session_state['leader_analysis_result']
-                leader_df = pd.DataFrame(res['leader_stocks'])
-                
-                # 관심 종목(왼쪽) 기준으로 주도주 정보(오른쪽)를 합칩니다.
-                merged_df = pd.merge(watchlist_df, leader_df, how='left', left_on='Code', right_on='코드')
+        # ---------------------------------------------------------
+        # 1. 테이블 UI (위쪽 배치, 심플한 컬럼만 노출)
+        # ---------------------------------------------------------
+        display_cols = ['Name', 'Market', '수익률(%)']
+        display_df = merged_df.reindex(columns=display_cols) 
+        display_df.rename(columns={'Name': '종목명', 'Market': '시장'}, inplace=True)
 
-                # 주도주 테이블과 동일한 컬럼 순서 및 이름으로 재구성
-                display_cols = ['Name', 'Code', 'Market', '최종 점수', '가중 Alpha 점수', 'Alpha Persistence(%)', '신고가 근접도(High Proximity)(%)', '수익률(%)', '시가총액', '평균거래대금']
-                display_df = merged_df.reindex(columns=display_cols)
-                display_df.rename(columns={'Name': '종목명', 'Code': '코드', 'Market': '시장'}, inplace=True)
+        styler = display_df.style.format({
+            "수익률(%)": "{:.2f}%"
+        }, na_rep="-")
 
-                # 10개까지만 보여주기
-                display_df = display_df.head(10)
-                
-                styler = display_df.style.format({
-                    "최종 점수": "{:.2f}", "가중 Alpha 점수": "{:.2f}",
-                    "Alpha Persistence(%)": "{:.2f}%", "신고가 근접도(High Proximity)(%)": "{:.2f}%", "수익률(%)": "{:.2f}%",
-                    "시가총액": "{:,.0f}억원", "평균거래대금": "{:,.0f}억원"
-                }, na_rep='-')
-                
-                event_w = st.dataframe(styler, width='stretch', hide_index=True, on_select="rerun", selection_mode="single-row", key="watchlist_table")
-            else:
-                # 분석 전이거나 결과가 없으면 기본 정보만 표시
-                display_df = display_df.head(10)
-                event_w = st.dataframe(display_df, width='stretch', hide_index=True, on_select="rerun", selection_mode="single-row", key="watchlist_table")
-            st.markdown("##### 등록된 종목 삭제")
-            remove_options = [f"{item['Name']} ({item['Code']})" for item in st.session_state['watchlist']]
-            col1_rem, col2_rem = st.columns([3, 1])
-            sel_to_remove = col1_rem.selectbox("삭제할 종목 선택", remove_options, label_visibility="collapsed", key="watchlist_remove_sel")
-            if col2_rem.button("❌ 관심 종목 삭제", width='stretch'):
-                code_to_rem = sel_to_remove.split('(')[1].split(')')[0]
-                st.session_state['watchlist'] = [i for i in st.session_state['watchlist'] if i['Code'] != code_to_rem]
-                save_watchlist(st.session_state['watchlist'])
-                st.rerun()
+        event_w = st.dataframe(styler, width='stretch', hide_index=True, on_select="rerun", selection_mode="single-row", key="watchlist_table")
 
-        with col_watch_chart:
-            # 관심 종목 차트 출력 로직
-            if event_w.selection.rows:
-                selected_idx = event_w.selection.rows[0]
-                row = display_df.iloc[selected_idx]
-                sel_code, sel_market, sel_name = (row['코드'], row['시장'], row['종목명']) if '코드' in row else (row['Code'], row['Market'], row['Name'])
+        # 삭제 UI를 테이블 바로 밑에 컴팩트하게 배치
+        st.markdown("##### 등록된 종목 삭제")
+        remove_options = [f"{item['Name']} ({item['Code']})" for item in st.session_state['watchlist']]
+        col1_rem, col2_rem = st.columns([3, 1])
+        sel_to_remove = col1_rem.selectbox("삭제할 종목 선택", remove_options, label_visibility="collapsed", key="watchlist_remove_sel")
+        if col2_rem.button("❌ 관심 종목 삭제", width='stretch'):
+            code_to_rem = sel_to_remove.split('(')[1].split(')')[0]
+            st.session_state['watchlist'] = [i for i in st.session_state['watchlist'] if i['Code'] != code_to_rem]
+            save_watchlist(st.session_state['watchlist'])
+            st.rerun()
+
+        # ---------------------------------------------------------
+        # 2. Alpha 추적 차트
+        # ---------------------------------------------------------
+        if event_w.selection.rows:
+            selected_idx = event_w.selection.rows[0]
+            
+            # 🌟 에러 원인 차단: 스트림릿이 삭제 전의 옛날 번호를 기억하고 있을 경우를 대비한 방어막!
+            if selected_idx < len(merged_df):
+                st.divider()
+                row = merged_df.iloc[selected_idx]
+                sel_code = row['Code'] if 'Code' in row else row['코드']
+                sel_name = row['Name'] if 'Name' in row else row['종목명']
+                sel_market = row['Market'] if 'Market' in row else row['시장']
                 sel_yahoo_code = to_yahoo_ticker(sel_code, sel_market)
                 
                 ticker_data = None
                 kospi_series = None
 
-                # 1. 분석 결과에 데이터가 있는지 확인
                 if 'leader_analysis_result' in st.session_state:
                     res = st.session_state['leader_analysis_result']
+                    analysis_days = res.get('analysis_days', 30)
+                    
                     if sel_yahoo_code in res['full_data']['Close'].columns:
-                        full_data = res['full_data']
                         ticker_data = pd.DataFrame({
-                            'Open': full_data['Open'][sel_yahoo_code],
-                            'High': full_data['High'][sel_yahoo_code],
-                            'Low': full_data['Low'][sel_yahoo_code],
-                            'Close': full_data['Close'][sel_yahoo_code],
-                            'Volume': full_data['Volume'][sel_yahoo_code]
-                        }).tail(60).dropna()
+                            'Close': res['full_data']['Close'][sel_yahoo_code],
+                            'Volume': res['full_data']['Volume'][sel_yahoo_code]
+                        }).tail(analysis_days).dropna()
                         
-                        if not res['kospi_close'].empty:
-                            kospi_series = res['kospi_close'].loc[ticker_data.index.intersection(res['kospi_close'].index)]
+                        if "^KS11" in res['full_data']['Close'].columns:
+                            full_kospi = res['full_data']['Close']["^KS11"].dropna()
+                            common_idx = ticker_data.index.intersection(full_kospi.index)
+                            ticker_data = ticker_data.loc[common_idx]
+                            kospi_series = full_kospi.loc[common_idx]
 
-                # 2. 데이터가 없으면 새로 다운로드
                 if ticker_data is None or ticker_data.empty:
                     with st.spinner(f"'{sel_name}' 종목의 최신 데이터를 가져오는 중..."):
                         today = datetime.date.today()
-                        start_date = today - datetime.timedelta(days=90) # 60일치 데이터를 위해 넉넉하게 90일 다운
-                        
+                        a_days = st.session_state.get('leader_analysis_result', {}).get('analysis_days', 30)
+                        margin_days = int(a_days * 1.5) + 15
+                        start_date = today - datetime.timedelta(days=margin_days)
                         try:
                             chart_data = yf.download([sel_yahoo_code, "^KS11"], start=start_date, end=today + datetime.timedelta(days=1), progress=False, ignore_tz=True)
-                            
                             if not chart_data.empty and sel_yahoo_code in chart_data['Close'].columns:
                                 ticker_data = pd.DataFrame({
-                                    'Open': chart_data['Open'][sel_yahoo_code],
-                                    'High': chart_data['High'][sel_yahoo_code],
-                                    'Low': chart_data['Low'][sel_yahoo_code],
                                     'Close': chart_data['Close'][sel_yahoo_code],
                                     'Volume': chart_data['Volume'][sel_yahoo_code]
-                                }).tail(60).dropna()
+                                }).tail(a_days).dropna()
                                 
-                                if not ticker_data.empty and "^KS11" in chart_data['Close'].columns:
+                                if "^KS11" in chart_data['Close'].columns:
                                     kospi_data_full = chart_data['Close']['^KS11'].dropna()
-                                    kospi_series = kospi_data_full.loc[ticker_data.index.intersection(kospi_data_full.index)]
+                                    common_idx = ticker_data.index.intersection(kospi_data_full.index)
+                                    ticker_data = ticker_data.loc[common_idx]
+                                    kospi_series = kospi_data_full.loc[common_idx]
                                 else:
                                     kospi_series = pd.Series()
-                            else:
-                                st.warning(f"'{sel_name}' 종목의 차트 데이터를 가져올 수 없습니다.")
                         except Exception as e:
                             st.error(f"데이터 다운로드 중 오류 발생: {e}")
-                            ticker_data = None
+                
+                if ticker_data is not None and not ticker_data.empty and kospi_series is not None and not kospi_series.empty:
+                    base_stock = ticker_data['Close'].iloc[0]
+                    base_kospi = kospi_series.iloc[0]
 
-                # 3. 차트 그리기
-                if ticker_data is not None and not ticker_data.empty:
-                        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, 
-                                           subplot_titles=(f"{sel_name} ({sel_code}) 차트", '거래량'), row_heights=[0.7, 0.3],
-                                           specs=[[{"secondary_y": True}], [{"secondary_y": False}]])
-                        
-                        fig.add_trace(go.Candlestick(x=ticker_data.index, open=ticker_data['Open'], high=ticker_data['High'],
-                                                   low=ticker_data['Low'], close=ticker_data['Close'], name='Price'), row=1, col=1)
-                        fig.add_trace(go.Scatter(x=ticker_data.index, y=ticker_data['Close'].rolling(5).mean(), name='MA5', line=dict(width=1)), row=1, col=1)
-                        if kospi_series is not None and not kospi_series.empty:
-                            fig.add_trace(go.Scatter(x=kospi_series.index, y=kospi_series, name='KOSPI', line=dict(color='purple', width=1, dash='dot')), row=1, col=1, secondary_y=True)
-                        fig.add_trace(go.Bar(x=ticker_data.index, y=ticker_data['Volume'], name='Volume', marker_color='gray'), row=2, col=1)
-                        fig.update_layout(xaxis_rangeslider_visible=False, height=500, margin=dict(t=30, b=10))
+                    stock_roi = (ticker_data['Close'] - base_stock) / base_stock * 100
+                    kospi_roi = (kospi_series - base_kospi) / base_kospi * 100
+                    alpha_series = stock_roi - kospi_roi
 
-                        fig.update_xaxes(type='category') # 휴장일 제거
+                    a_days = st.session_state.get('leader_analysis_result', {}).get('analysis_days', len(ticker_data))
 
-                        tickvals = ticker_data.index[::5]
-                        fig.update_xaxes(tickmode='array', tickvals=tickvals, ticktext=[d.strftime('%Y-%m-%d') for d in tickvals])
+                    date_strings = ticker_data.index.strftime('%Y-%m-%d')
 
-                        if kospi_series is not None and not kospi_series.empty and not ticker_data['Close'].empty:
-                            stock_start, kospi_start = ticker_data['Close'].iloc[0], kospi_series.iloc[0]
-                            if stock_start != 0:
-                                ratio = kospi_start / stock_start
-                                y1_min, y1_max = ticker_data['Low'].min(), ticker_data['High'].max()
-                                fig.update_layout(yaxis2=dict(range=[y1_min * ratio, y1_max * ratio], overlaying='y', side='right', title='KOSPI'))
-                        st.plotly_chart(fig, use_container_width=True)
+                    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, 
+                                        subplot_titles=(f"🔥 {sel_name} 초과 수익(Alpha) 추적 차트 ({a_days}거래일)", '거래량'), 
+                                        row_heights=[0.7, 0.3])
+                    
+                    fig.add_trace(go.Scatter(
+                        x=date_strings, y=kospi_roi, customdata=kospi_series, 
+                        name='KOSPI', line=dict(color='gray', width=2, dash='dot'),
+                        hovertemplate="KOSPI 수익률: %{y:.2f}%<br>KOSPI 지수: %{customdata:,.2f}"
+                    ), row=1, col=1)
+                    
+                    fig.add_trace(go.Scatter(
+                        x=date_strings, y=alpha_series, customdata=ticker_data['Close'], 
+                        name='🌟 Alpha', line=dict(color='#FF4B4B', width=3), 
+                        fill='tozeroy', fillcolor='rgba(255, 75, 75, 0.1)',
+                        hovertemplate="누적 Alpha: %{y:.2f}%<br>종목 현재가: %{customdata:,.0f}원"
+                    ), row=1, col=1)
+
+                    fig.add_trace(go.Bar(
+                        x=date_strings, y=ticker_data['Volume'], 
+                        name='거래량', marker_color='lightblue',
+                        hovertemplate="%{y:,.0f}주"
+                    ), row=2, col=1)
+
+                    fig.update_layout(
+                        xaxis_rangeslider_visible=False, height=500, margin=dict(t=30, b=10), 
+                        hovermode='x unified',
+                        hoverlabel=dict(bgcolor="white", font_color="black", font_size=13, font_family="Arial")
+                    )
+                    fig.update_yaxes(title_text="수익률 격차 (%)", row=1, col=1)
+                    
+                    fig.update_xaxes(type='category')
+                    tickvals_str = date_strings[::5]
+                    fig.update_xaxes(tickmode='array', tickvals=tickvals_str, ticktext=tickvals_str)
+
+                    st.plotly_chart(fig, width='stretch')
+                else:
+                    st.warning("차트를 그리기 위한 충분한 벤치마크 데이터가 없습니다.")
             else:
-                st.info("테이블에서 종목을 선택하면 상세 차트가 표시됩니다.")
+                # 🌟 방어막 작동! 삭제 후 에러가 나지 않고 깔끔한 안내 문구를 띄웁니다.
+                st.info("👆 선택했던 종목이 삭제되었습니다. 표에서 다시 종목을 선택해 주세요.")
+        else:
+            st.info("👆 위 테이블에서 종목을 선택하면 상세 Alpha 차트가 표시됩니다.")
     else:
         st.info("등록된 관심 종목이 없습니다. 위에서 직접 추가하거나, 분석 결과에서 종목을 추가해 보세요.")
-
-# 앱 최초 실행 시 관심종목이 있으면 자동으로 분석을 트리거합니다.
-if 'analysis_run_for' not in st.session_state:
-    if st.session_state.watchlist:
-        st.session_state.analysis_needed = 'watchlist'
-
 
 # ---------------------------------------------------------
 # 사이드바: 사용자 입력
@@ -679,7 +782,6 @@ if 'leader_analysis_result' in st.session_state:
 
         st.success(f"🚀 총 {total_found}개의 주도주 후보 종목 발견!")
 
-        # 화면에 보여줄 컬럼 리스트에 '매집 흔적(점수)' 추가
         display_cols = [
             '종목명', '코드', '시장', '최종 점수', '가중 Alpha 점수', 'Alpha Persistence(%)', '신고가 근접도(%)', '매집 흔적(점수)', '수익률(%)',
             '시가총액', '평균거래대금'
@@ -692,87 +794,144 @@ if 'leader_analysis_result' in st.session_state:
             "시가총액": "{:,.0f}억원", "평균거래대금": "{:,.0f}억원"
         })
 
-        col_leader_table, col_leader_chart = st.columns([3, 2])
+        # 🌟 1. 테이블과 차트를 상하 레이아웃으로 변경 (st.columns 제거)
+        # 🌟 2. height=400 (약 10개 종목 높이) 지정으로 깔끔한 자체 스크롤 생성!
+        event = st.dataframe(
+            styler, width='stretch', height=400, hide_index=True,
+            on_select="rerun", selection_mode="single-row", key="leader_stock_table"
+        )
+        
+        # 🌟 엑셀 다운로드 버튼 (화면과 100% 동일한 포맷팅 적용)
+        excel_df = result_df_display.copy()
+        
+        # 엑셀에 저장될 데이터에 화면과 똑같은 서식(%, 억원, 점) 입히기
+        excel_df['최종 점수'] = excel_df['최종 점수'].map("{:.2f}".format)
+        excel_df['가중 Alpha 점수'] = excel_df['가중 Alpha 점수'].map("{:.2f}".format)
+        excel_df['Alpha Persistence(%)'] = excel_df['Alpha Persistence(%)'].map("{:.2f}%".format)
+        excel_df['신고가 근접도(%)'] = excel_df['신고가 근접도(%)'].map("{:.2f}%".format)
+        excel_df['매집 흔적(점수)'] = excel_df['매집 흔적(점수)'].map("{:.0f}점".format)
+        excel_df['수익률(%)'] = excel_df['수익률(%)'].map("{:.2f}%".format)
+        excel_df['시가총액'] = excel_df['시가총액'].map("{:,.0f}억원".format)
+        excel_df['평균거래대금'] = excel_df['평균거래대금'].map("{:,.0f}억원".format)
 
-        with col_leader_table:
-            event = st.dataframe(
-                styler, width='stretch', hide_index=True,
-                on_select="rerun", selection_mode="single-row", key="leader_stock_table"
-            )
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+            excel_df.to_excel(writer, index=False, sheet_name='LeaderStocks')
             
-            # 관심 종목 등록 버튼
-            if event.selection.rows:
-                selected_idx = event.selection.rows[0]
+            # 💡 보너스 디테일: 엑셀 파일의 각 열(Column) 너비를 글자 길이에 맞춰 자동 조절해 줍니다!
+            worksheet = writer.sheets['LeaderStocks']
+            for i, col in enumerate(excel_df.columns):
+                # 컬럼 이름의 길이와 데이터의 최대 길이 중 긴 것을 선택해 여백(+2)을 줌
+                column_len = max(excel_df[col].astype(str).map(len).max(), len(col)) + 2
+                # 한글 깨짐 방지를 위해 너비를 조금 더 넉넉하게 보정 (1.5배)
+                worksheet.set_column(i, i, column_len * 1.5)
 
-            # 엑셀 다운로드
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                result_df.to_excel(writer, index=False, sheet_name='LeaderStocks')
-            st.download_button(
-                label="📥 엑셀 파일 다운로드", data=buffer,
-                file_name=f"leader_stocks_{e_date}.xlsx", mime="application/vnd.ms-excel"
-            )
+        # 🌟 파일명 자동 생성 로직: 날짜와 사이드바의 설정값들을 모두 가져와 조합합니다!
+        # 예시: 주도주_2026-03-08_전체_시총4000억_대금100억_30일_Alpha10.0%.xlsx
+        dynamic_file_name = f"주도주_{e_date}_{market_selection}_시총{marcap_threshold}억_대금{avg_trade_val_threshold}억_{analysis_days}일_Alpha{target_alpha}%.xlsx"
 
-        with col_leader_chart:
-            st.subheader(f"📈 {analysis_days}거래일 수익률 상세 비교")
-            
-            option_list = [f"{row['종목명']} ({row['코드']})" for _, row in result_df.iterrows()]
-            code_map = {label: code for label, code in zip(option_list, result_df['코드'])}
-            market_map_from_df = result_df.set_index('코드')['시장'].to_dict()
-            
-            if 'leader_last_selection_rows' not in st.session_state: st.session_state.leader_last_selection_rows = []
-            current_selection_rows = event.selection.rows
-            selectbox_key = "leader_chart_ticker_select"
-            
-            if current_selection_rows != st.session_state.leader_last_selection_rows:
-                if current_selection_rows:
-                    idx = current_selection_rows[0]
-                    if idx < len(option_list): st.session_state[selectbox_key] = option_list[idx]
-                st.session_state.leader_last_selection_rows = current_selection_rows
+        st.download_button(
+            label="📥 화면과 동일한 엑셀 다운로드", data=buffer,
+            file_name=dynamic_file_name, # 동적으로 생성된 파일명 적용
+            mime="application/vnd.ms-excel"
+        )
+        
+        st.divider() # 테이블과 차트 사이를 가르는 깔끔한 선 추가
 
-            selected_label = st.selectbox("차트로 확인할 종목을 선택하세요:", option_list, key=selectbox_key)
+# ---------------------------------------------------------
+        # 🌟 하단 차트 (전통적인 캔들스틱 봉 차트 복구 + KOSPI 보조축)
+        # ---------------------------------------------------------
+        st.subheader(f"🕯️ {analysis_days}거래일 주도주 상세 가격 차트 (봉 차트)")
+        
+        option_list = [f"{row['종목명']} ({row['코드']})" for _, row in result_df.iterrows()]
+        code_map = {label: code for label, code in zip(option_list, result_df['코드'])}
+        market_map_from_df = result_df.set_index('코드')['시장'].to_dict()
+        
+        if 'leader_last_selection_rows' not in st.session_state: st.session_state.leader_last_selection_rows = []
+        current_selection_rows = event.selection.rows
+        selectbox_key = "leader_chart_ticker_select"
+        
+        if current_selection_rows != st.session_state.leader_last_selection_rows:
+            if current_selection_rows:
+                idx = current_selection_rows[0]
+                if idx < len(option_list): st.session_state[selectbox_key] = option_list[idx]
+            st.session_state.leader_last_selection_rows = current_selection_rows
+
+        selected_label = st.selectbox("차트로 확인할 종목을 선택하세요:", option_list, key=selectbox_key)
+        
+        if selected_label:
+            sel_code = code_map[selected_label]
+            sel_market = market_map_from_df[sel_code]
+            sel_yahoo_code = to_yahoo_ticker(sel_code, sel_market)
             
-            if selected_label:
-                sel_code = code_map[selected_label]
-                sel_market = market_map_from_df[sel_code]
-                sel_yahoo_code = to_yahoo_ticker(sel_code, sel_market)
+            if sel_yahoo_code in close_df.columns:
+                full_data = res['full_data']
                 
-                if sel_yahoo_code in close_df.columns:
-                    # 주도주 분석용 전문 차트
-                    full_data = res['full_data']
-                    ticker_data = pd.DataFrame({
-                        'Open': full_data['Open'][sel_yahoo_code],
-                        'High': full_data['High'][sel_yahoo_code],
-                        'Low': full_data['Low'][sel_yahoo_code],
-                        'Close': full_data['Close'][sel_yahoo_code],
-                        'Volume': full_data['Volume'][sel_yahoo_code]
-                    }).tail(60).dropna()
+                # 🌟 캔들 차트를 위해 Open, High, Low 데이터도 다시 가져옵니다!
+                ticker_data = pd.DataFrame({
+                    'Open': full_data['Open'][sel_yahoo_code],
+                    'High': full_data['High'][sel_yahoo_code],
+                    'Low': full_data['Low'][sel_yahoo_code],
+                    'Close': full_data['Close'][sel_yahoo_code],
+                    'Volume': full_data['Volume'][sel_yahoo_code]
+                }).tail(analysis_days).dropna()
 
-                    # KOSPI 지수 데이터 준비
-                    kospi_series = kospi_close.loc[ticker_data.index.intersection(kospi_close.index)]
+                if "^KS11" in full_data['Close'].columns:
+                    full_kospi = full_data['Close']["^KS11"].dropna()
+                    common_idx = ticker_data.index.intersection(full_kospi.index)
+                    ticker_data = ticker_data.loc[common_idx]
+                    kospi_series = full_kospi.loc[common_idx]
+                else:
+                    kospi_series = pd.Series()
 
+                if ticker_data is not None and not ticker_data.empty and not kospi_series.empty:
+                    # 날짜 문자열 변환 (시간 표시 제거)
+                    date_strings = ticker_data.index.strftime('%Y-%m-%d')
+
+                    # 🌟 캔들 차트를 위해 secondary_y(보조축) 설정 추가
                     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, 
-                                       subplot_titles=(f"{selected_label} 주도주 상세 차트", '거래량'), row_heights=[0.7, 0.3],
-                                       specs=[[{"secondary_y": True}], [{"secondary_y": False}]])
+                                        subplot_titles=(f"📈 {selected_label} 주가 상세 차트", '거래량'), 
+                                        row_heights=[0.7, 0.3],
+                                        specs=[[{"secondary_y": True}], [{"secondary_y": False}]])
                     
-                    fig.add_trace(go.Candlestick(x=ticker_data.index, open=ticker_data['Open'], high=ticker_data['High'],
-                                               low=ticker_data['Low'], close=ticker_data['Close'], name='Price'), row=1, col=1)
-                    fig.add_trace(go.Scatter(x=ticker_data.index, y=ticker_data['Close'].rolling(5).mean(), name='MA5', line=dict(width=1)), row=1, col=1)
+                    # 1. 캔들스틱 (봉) 차트
+                    fig.add_trace(go.Candlestick(
+                        x=date_strings, open=ticker_data['Open'], high=ticker_data['High'],
+                        low=ticker_data['Low'], close=ticker_data['Close'], name='가격'
+                    ), row=1, col=1)
                     
-                    # KOSPI 지수 추가 (보조 y축)
+                    # 2. 5일 이동평균선
+                    fig.add_trace(go.Scatter(
+                        x=date_strings, y=ticker_data['Close'].rolling(5).mean(), 
+                        name='MA5', line=dict(color='orange', width=1.5)
+                    ), row=1, col=1)
+                    
+                    # 3. KOSPI 지수 (보조 y축)
                     if not kospi_series.empty:
-                        fig.add_trace(go.Scatter(x=kospi_series.index, y=kospi_series, name='KOSPI', line=dict(color='purple', width=1, dash='dot')), row=1, col=1, secondary_y=True)
+                        fig.add_trace(go.Scatter(
+                            x=date_strings, y=kospi_series, name='KOSPI', 
+                            line=dict(color='purple', width=1.5, dash='dot')
+                        ), row=1, col=1, secondary_y=True)
 
-                    fig.add_trace(go.Bar(x=ticker_data.index, y=ticker_data['Volume'], name='Volume', marker_color='gray'), row=2, col=1)
+                    # 4. 거래량 (하단)
+                    fig.add_trace(go.Bar(
+                        x=date_strings, y=ticker_data['Volume'], 
+                        name='거래량', marker_color='lightblue', hovertemplate="%{y:,.0f}주"
+                    ), row=2, col=1)
+
+                    # 레이아웃 및 툴팁 디자인 최적화
+                    fig.update_layout(
+                        xaxis_rangeslider_visible=False, height=550, margin=dict(t=30, b=10), 
+                        hovermode='x unified',
+                        hoverlabel=dict(bgcolor="white", font_color="black", font_size=13, font_family="Arial")
+                    )
                     
-                    fig.update_layout(xaxis_rangeslider_visible=False, height=600, margin=dict(t=30, b=10))
+                    # X축 휴장일 제거 포맷팅
+                    fig.update_xaxes(type='category')
+                    tickvals_str = date_strings[::5]
+                    fig.update_xaxes(tickmode='array', tickvals=tickvals_str, ticktext=tickvals_str)
 
-                    fig.update_xaxes(type='category') # 휴장일 제거
-
-                    tickvals = ticker_data.index[::5]
-                    fig.update_xaxes(tickmode='array', tickvals=tickvals, ticktext=[d.strftime('%Y-%m-%d') for d in tickvals])
-
-                    # Y축 중심 정렬 로직
+                    # 🌟 Y축 중심 정렬 (KOSPI와 주가 차트를 동일한 비율로 겹쳐서 비교!)
                     if not kospi_series.empty and not ticker_data['Close'].empty:
                         stock_start = ticker_data['Close'].iloc[0]
                         kospi_start = kospi_series.iloc[0]
@@ -789,7 +948,7 @@ if 'leader_analysis_result' in st.session_state:
                             )
 
                     st.plotly_chart(fig, width='stretch')
-            else:
-                st.info("테이블에서 종목을 선택하면 상세 차트가 표시됩니다.")
-    else:
-        st.warning("조건을 만족하는 주도주 후보 종목이 없습니다.")
+        else:
+            st.info("테이블에서 종목을 선택하면 상세 차트가 표시됩니다.")
+else:
+    st.warning("조건을 만족하는 주도주 후보 종목이 없습니다.")
