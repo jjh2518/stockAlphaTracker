@@ -141,7 +141,7 @@ def run_leader_analysis(stock_df, analysis_days, target_alpha, avg_trade_val_thr
                 
             progress_bar.progress(50, text="Step 2. 데이터 다운로드 완료")
 
-# 3. 데이터 전처리 및 계산
+        # 3. 데이터 전처리 및 계산
         status_text.text("Step 3: 주도주 점수 및 기관 매집 흔적 계산 중...")
         open_df, close_df, volume_df = data['Open'], data['Close'], data['Volume']
 
@@ -248,30 +248,36 @@ def run_leader_analysis(stock_df, analysis_days, target_alpha, avg_trade_val_thr
         
         # 평균 거래대금 계산 (원 단위)
         avg_trade_vals_raw = (close_df * volume_df).mean(axis=0)
-        threshold_won = avg_trade_val_threshold * 100_000_000 # 억 단위를 원 단위로 변환
+        threshold_won = avg_trade_val_threshold * 100_000_000 
         
         # 1. Alpha 점수 조건 + 2. 평균거래대금 조건 동시 만족 필터링
         trade_val_mask = avg_trade_vals_raw >= threshold_won
         high_score_series = final_scores[(final_scores >= target_alpha) & (trade_val_mask.reindex(final_scores.index, fill_value=False))]
 
+        # 🌟 버그 차단 1: 조건 만족 종목이 0개라도 무조건 계산하도록 밖으로 꺼냅니다!
+        stock_total_roi = (close_df.iloc[-1] - stock_base_prices) / stock_base_prices * 100
+        benchmark_total_roi = (kospi_close.iloc[-1] - kospi_base_price) / kospi_base_price * 100
+
+        # 🌟 전체 종목에 대해 MDD(최대 낙폭) 미리 계산
+        rolling_max = close_df.cummax()
+        drawdown = (close_df - rolling_max) / rolling_max * 100
+        mdd_series = drawdown.min() 
+
         leader_stocks = []
         if not high_score_series.empty:
-            # Alpha 점수 랭크 기반 정규화 (아웃라이어 왜곡 방지)
+            # Alpha 점수 랭크 기반 정규화
             normalized_scores = high_score_series.rank(pct=True) * 100
 
             ap_scores = alpha_persistence_normalized.reindex(high_score_series.index).fillna(0)
             hp_scores = high_proximity_normalized.reindex(high_score_series.index).fillna(0)
             vs_scores = volume_spike_normalized.reindex(high_score_series.index).fillna(0)
             
-            # 🏆 새로운 주도주 통합 점수 가중치 (Alpha 35%, 매물대 25%, 승률 25%, 매집 15%)
+            # 주도주 통합 점수 가중치
             final_leader_score = (0.35 * normalized_scores) + (0.25 * ap_scores) + (0.25 * hp_scores) + (0.15 * vs_scores)
 
             yahoo_to_code_map = {v: k for k, v in {code: to_yahoo_ticker(code, market) for code, market in market_map.items()}.items()}
             filtered_codes = [yahoo_to_code_map.get(yc) for yc in high_score_series.index if yahoo_to_code_map.get(yc)]
             
-            stock_total_roi = (close_df.iloc[-1] - stock_base_prices) / stock_base_prices * 100
-            benchmark_total_roi = (kospi_close.iloc[-1] - kospi_base_price) / kospi_base_price * 100
-
             result_df = pd.DataFrame({'코드': filtered_codes})
             result_df['종목명'] = result_df['코드'].map(name_map)
             result_df['시장'] = result_df['코드'].map(market_map)
@@ -281,8 +287,11 @@ def run_leader_analysis(stock_df, analysis_days, target_alpha, avg_trade_val_thr
             result_df['신고가 근접도(%)'] = result_df['코드'].map(lambda c: high_proximity_normalized.get(to_yahoo_ticker(c, market_map.get(c)))).round(2)
             result_df['매집 흔적(점수)'] = result_df['코드'].map(lambda c: volume_spike_normalized.get(to_yahoo_ticker(c, market_map.get(c)))).round(2)
             result_df['수익률(%)'] = result_df['코드'].map(lambda c: stock_total_roi.get(to_yahoo_ticker(c, market_map.get(c)))).round(2)
+            
+            # MDD 삽입
+            result_df['MDD(%)'] = result_df['코드'].map(lambda c: mdd_series.get(to_yahoo_ticker(c, market_map.get(c)))).round(2)
+            
             result_df['시가총액'] = (result_df['코드'].map(marcap_map).fillna(0) / 100000000).astype(int)
-
             avg_trade_vals = (close_df * volume_df).mean() / 100000000
             result_df['평균거래대금'] = result_df['코드'].map(lambda c: avg_trade_vals.get(to_yahoo_ticker(c, market_map.get(c)))).fillna(0).astype(int)
 
@@ -290,7 +299,7 @@ def run_leader_analysis(stock_df, analysis_days, target_alpha, avg_trade_val_thr
 
         progress_bar.progress(100, text="Step 4. 분석 완료!")
 
-        # 5. 결과 반환
+        # 🌟 날아갔던 꼬리 복구 1: 분석 결과를 딕셔너리로 안전하게 포장해서 반환합니다!
         return {
             'leader_stocks': leader_stocks,
             'open_df': open_df,
@@ -304,6 +313,7 @@ def run_leader_analysis(stock_df, analysis_days, target_alpha, avg_trade_val_thr
             'analysis_days': analysis_days
         }
 
+    # 🌟 날아갔던 꼬리 복구 2: 위쪽의 try: 와 짝을 맞추는 except: 입니다!
     except Exception as e:
         st.error(f"주도주 분석 중 오류가 발생했습니다: {e}")
         return None
@@ -782,15 +792,18 @@ if 'leader_analysis_result' in st.session_state:
 
         st.success(f"🚀 총 {total_found}개의 주도주 후보 종목 발견!")
 
+        # 🌟 화면에 보여줄 컬럼에 'MDD(%)' 추가
         display_cols = [
-            '종목명', '코드', '시장', '최종 점수', '가중 Alpha 점수', 'Alpha Persistence(%)', '신고가 근접도(%)', '매집 흔적(점수)', '수익률(%)',
+            '종목명', '코드', '시장', '최종 점수', '가중 Alpha 점수', 'Alpha Persistence(%)', '신고가 근접도(%)', '매집 흔적(점수)', '수익률(%)', 'MDD(%)',
             '시가총액', '평균거래대금'
         ]
         result_df_display = result_df.reindex(columns=display_cols).fillna(0)
         
+        # 🌟 포맷팅(styler)에도 MDD 형식 추가
         styler = result_df_display.style.format({
             "최종 점수": "{:.2f}", "가중 Alpha 점수": "{:.2f}", "Alpha Persistence(%)": "{:.2f}%", 
             "신고가 근접도(%)": "{:.2f}%", "매집 흔적(점수)": "{:.0f}점", "수익률(%)": "{:.2f}%",
+            "MDD(%)": "{:.2f}%",  # <-- 여기!
             "시가총액": "{:,.0f}억원", "평균거래대금": "{:,.0f}억원"
         })
 
@@ -813,6 +826,7 @@ if 'leader_analysis_result' in st.session_state:
         excel_df['수익률(%)'] = excel_df['수익률(%)'].map("{:.2f}%".format)
         excel_df['시가총액'] = excel_df['시가총액'].map("{:,.0f}억원".format)
         excel_df['평균거래대금'] = excel_df['평균거래대금'].map("{:,.0f}억원".format)
+        excel_df['MDD(%)'] = excel_df['MDD(%)'].map("{:.2f}%".format)
 
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
@@ -835,10 +849,71 @@ if 'leader_analysis_result' in st.session_state:
             file_name=dynamic_file_name, # 동적으로 생성된 파일명 적용
             mime="application/vnd.ms-excel"
         )
-        
+
         st.divider() # 테이블과 차트 사이를 가르는 깔끔한 선 추가
 
-# ---------------------------------------------------------
+        # ---------------------------------------------------------
+        # 🌟 [신규 기능] 리스크-리턴 산점도 (Scatter Plot)
+        # ---------------------------------------------------------
+        st.subheader(f"🎯 주도주 리스크-리턴 분포도 (수익률 vs MDD)")
+        st.markdown("💡 **좌측 상단(왼쪽 위)**에 위치할수록 낙폭(Risk)은 적고 수익률(Return)은 높은 **명품 주도주**입니다.")
+
+        # 🌟 버그 차단 2: 예전 캐시 데이터가 남아있어서 MDD 컬럼이 없다면 안전하게 0으로 채워 에러를 막습니다!
+        if 'MDD(%)' not in result_df.columns:
+            result_df['MDD(%)'] = 0.0
+
+        # MDD를 양수(절대값)로 변환하여 X축(위험도)으로 사용합니다. (왼쪽이 안전, 오른쪽이 위험)
+        risk_x = result_df['MDD(%)'].abs() 
+
+        fig_scatter = go.Figure()
+
+        # 마우스 호버(툴팁) 텍스트 생성
+        hover_texts = []
+        for _, row in result_df.iterrows():
+            hover_texts.append(
+                f"<b>{row['종목명']} ({row['코드']})</b><br>"
+                f"수익률: {row['수익률(%)']:.2f}%<br>"
+                f"MDD: {row['MDD(%)']:.2f}%<br>"
+                f"최종 점수: {row['최종 점수']:.2f}점"
+            )
+
+        # 산점도 그리기
+        fig_scatter.add_trace(go.Scatter(
+            x=risk_x, 
+            y=result_df['수익률(%)'],
+            mode='markers+text',
+            text=result_df['종목명'], # 마커 옆에 종목명 이름표 붙이기
+            textposition='top center',
+            hovertext=hover_texts,
+            hoverinfo='text',
+            marker=dict(
+                size=14,
+                color=result_df['최종 점수'], # 점수가 높을수록 색상이 진해짐
+                colorscale='Viridis', # 고급스러운 색상 테마
+                showscale=True,
+                colorbar=dict(title="최종 점수"),
+                line=dict(width=1, color='DarkSlateGrey')
+            )
+        ))
+
+        # 코스피 벤치마크 수익률 가이드라인 추가
+        fig_scatter.add_hline(
+            y=benchmark_roi, line_dash="dot", line_color="gray", 
+            annotation_text=f"KOSPI 시장 수익률 ({benchmark_roi:.2f}%)", 
+            annotation_position="bottom right"
+        )
+
+        # 레이아웃 디자인 최적화
+        fig_scatter.update_layout(
+            height=550,
+            xaxis_title="위험도 (MDD 절대값, %)",
+            yaxis_title="수익률 (%)",
+            margin=dict(l=20, r=20, t=30, b=20),
+            hoverlabel=dict(bgcolor="white", font_color="black", font_size=13, font_family="Arial")
+        )
+
+        st.plotly_chart(fig_scatter, width='stretch')
+        # ---------------------------------------------------------
         # 🌟 하단 차트 (전통적인 캔들스틱 봉 차트 복구 + KOSPI 보조축)
         # ---------------------------------------------------------
         st.subheader(f"🕯️ {analysis_days}거래일 주도주 상세 가격 차트 (봉 차트)")
